@@ -9,6 +9,7 @@ from torch.distributions import Categorical
 
 import gymnasium as gym
 from minigrid_adapter import make_minigrid_env
+from profiling_utils import compute_policy_entropy, compute_kl_divergence
 
 # ---------- Simple REINFORCE matching your flags ----------
 
@@ -99,7 +100,12 @@ def train(args):
     opt_v = optim.Adam(value.parameters(), lr=args.v_lr) if value else None
 
     best_ret = -1e9
+    entropies = []
+    kl_divs = []
+    old_policy_state_dict = None  # For KL comparison
+
     for ep in range(1, args.episodes + 1):
+        total_entropy = 0.0
         # toggle rendering by recreating the env exactly when needed
         render_now = args.render_every > 0 and (ep % args.render_every == 0)
 
@@ -142,15 +148,27 @@ def train(args):
         else:
             loss_v = torch.tensor(0.0)
 
+        # ---- Profiling ----
+        with torch.no_grad():
+            # Get logits before and after update for KL comparison
+            new_logits = policy(obs_t)
+            entropy = compute_policy_entropy(new_logits)
+            total_entropy += entropy
+        
+        avg_entropy = total_entropy / traj['len']
+
         if ep % args.log_every == 0:
             avg_r = traj["ret"]; best_ret = max(best_ret, avg_r)
             print(
                 f"ep {ep:5d} | len {traj['len']:3d} | ret {avg_r:6.2f} | "
-                f"L_pi {loss_pi.item():.3f} | L_v {loss_v.item():.3f} | best {best_ret:.2f}"
+                f"L_pi {loss_pi.item():.3f} | L_v {loss_v.item():.3f} | "
+                f"H {avg_entropy:.3f} | best {best_ret:.2f}"
             )
 
     env.close()
 
+    np.savez("profiling_metrics.npz", entropy=np.array(entropies), kl=np.array(kl_divs))
+    print("Saved profiling metrics to profiling_metrics.npz")
 
 def parse_args():
     p = argparse.ArgumentParser(description="REINFORCE on MiniGrid via flat-obs adapter")
