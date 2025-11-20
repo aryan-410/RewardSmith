@@ -9,17 +9,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-# Environment: Gymnasium (not an RL helper lib, only the simulator)
 try:
     import gymnasium as gym
 except ImportError:
     raise SystemExit("Please install gymnasium: pip install gymnasium")
 
-# -------------------------------
-# (Optional) TinyCartPole stub
-# -------------------------------
-# Placeholder for from-scratch CartPole if avoiding gym completely.
+#simple cartpole environment placeholder if avoiding gym
 class TinyCartPole:
+    #initializes cartpole environment w random seed
     def __init__(self, seed: int = 0):
         self.np_random = np.random.default_rng(seed)
         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32)
@@ -27,6 +24,7 @@ class TinyCartPole:
         self.state = None
         self.t = 0
 
+    #resets environment to initial state
     def reset(self, seed=None):
         if seed is not None:
             self.np_random = np.random.default_rng(seed)
@@ -34,6 +32,7 @@ class TinyCartPole:
         self.t = 0
         return self.state, {}
 
+    #takes action and returns next state, reward, and done flag
     def step(self, action: int):
         s = self.state
         s = s + self.np_random.normal(0.0, 0.02, size=(4,)).astype(np.float32) + (1 if action == 1 else -1)*0.005
@@ -51,11 +50,9 @@ class TinyCartPole:
         pass
 
 
-# -------------------------------
-# Networks
-# -------------------------------
-
+#takes what agent sees and outputs score for each action, then, agent picks action w highest score
 class PolicyNet(nn.Module):
+    #builds network w 2 hidden layers of 128 nodes each, then output layer w one score per action
     def __init__(self, obs_dim: int, act_dim: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -66,11 +63,14 @@ class PolicyNet(nn.Module):
             nn.Linear(128, act_dim),
         )
 
+    #runs observation through network and returns action scores
     def forward(self, x):
         logits = self.net(x)
         return logits
 
+#takes what agent sees and outputs single number predicting how good this state is
 class ValueNet(nn.Module):
+    #builds network w 2 hidden layers of 128 nodes each, then output layer w single value
     def __init__(self, obs_dim: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -81,6 +81,7 @@ class ValueNet(nn.Module):
             nn.Linear(128, 1),
         )
 
+    #runs observation through network and returns predicted state value
     def forward(self, x):
         return self.net(x).squeeze(-1)
 
@@ -93,13 +94,14 @@ class Trajectory:
     logps: List[float]
     dones: List[bool]
 
+#sets random seed for reproducibility
 def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+#takes list of rewards and computes discounted return for each step, later rewards worth less
 def discount_cumsum(rewards: List[float], gamma: float) -> np.ndarray:
-    """Compute reward-to-go (discounted) returns G_t for one episode."""
     G = np.zeros(len(rewards), dtype=np.float32)
     g = 0.0
     for t in reversed(range(len(rewards))):
@@ -107,6 +109,7 @@ def discount_cumsum(rewards: List[float], gamma: float) -> np.ndarray:
         G[t] = g
     return G
 
+#runs agent through episodes, collects all observations, actions, and rewards
 def collect_episodes(env, policy: PolicyNet, episodes: int, render_every: int, device: torch.device) -> Tuple[List[Trajectory], float]:
     policy.eval()
     trajs: List[Trajectory] = []
@@ -151,6 +154,7 @@ def collect_episodes(env, policy: PolicyNet, episodes: int, render_every: int, d
     avg_return = float(np.mean(ep_returns)) if ep_returns else 0.0
     return trajs, avg_return
 
+#combines trajectories into batch tensors, computes returns, optionally normalizes
 def compute_batch_tensors(trajs: List[Trajectory], gamma: float, device: torch.device, reward_norm: bool):
     states = np.concatenate([np.array(tr.states, dtype=np.float32) for tr in trajs], axis=0)
     actions = np.concatenate([np.array(tr.actions, dtype=np.int64) for tr in trajs], axis=0)
@@ -167,6 +171,7 @@ def compute_batch_tensors(trajs: List[Trajectory], gamma: float, device: torch.d
     returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
     return states_t, actions_t, logps_t, returns_t
 
+#main training loop, runs episodes, collects data, updates policy and value networks
 def train(args):
     set_seed(args.seed)
     print("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
@@ -239,6 +244,7 @@ def train(args):
     env.close()
 
 
+#reads command line arguments like number of episodes, learning rate, etc
 def parse_args():
     p = argparse.ArgumentParser(description="Vanilla REINFORCE on CartPole (no RL libs)")
     p.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
