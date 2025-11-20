@@ -1,88 +1,164 @@
 import numpy as np
+import time
+from typing import List, Optional
+import torch
+import torch.nn as nn
 
-def return_var(ep_rewards, window_size=None):
+class RewardMetrics:
     """
-    Computes the variance of total episode rewards.
-    Used to assess consistency of policy performance over training.
-    
-    Args:
-        ep_rewards (list or np.array): total reward per episode
-        window_size (int, optional): number of recent episodes to include. 
-                                     If None, uses all episodes.
-    Returns:
-        float: variance of episode returns
+    Tracks and computes RL metrics: 
+    - Best Episode Reward
+    - Return Variance (over last N episodes)
     """
-    if len(ep_rewards) == 0:
-        return 0.0
-    
-    # Optionally limit to recent eps for smoother tracking
-    rewards_window = ep_rewards[-window_size:] if window_size else ep_rewards
-    return np.var(rewards_window)
+    def __init__(self, window: int = 100):
+        self.ep_returns: List[float] = []
+        self.window = window
+        self.best_reward = -np.inf
+
+    def update(self, ep_return: float):
+        """
+        Call this after each episode with the episode's total reward.
+        """
+        self.ep_returns.append(ep_return)
+        if ep_return > self.best_reward:
+            self.best_reward = ep_return
+
+    def get_best_reward(self) -> float:
+        """
+        Returns the highest episode reward seen so far.
+        """
+        return self.best_reward
+
+    def get_return_variance(self) -> float:
+        """
+        Returns variance of the last `window` episode rewards.
+        If fewer than `window` episodes, uses all available.
+        """
+        if not self.ep_returns:
+            return 0.0
+        recent = self.ep_returns[-self.window:] if len(self.ep_returns) >= self.window else self.ep_returns
+        return float(np.var(recent))
+
+    def get_last_returns(self, n: int = 10) -> List[float]:
+        """
+        Optional: Returns last n episode returns for logging/plotting.
+        """
+        return self.ep_returns[-n:]
 
 
-def best_ep_reward(ep_rewards):
+class TrainingTimeProfiler:
     """
-    Returns the highest episode reward achieved so far.
-    Used to track the peak performance of the current policy.
-    
-    Args:
-        ep_rewards (list or np.array): total reward per ep
-    Returns:
-        float: maximum total reward
+    Tracks training time metrics:
+    - Total training time
+    - Time per episode
+    - Average time per episode (over last N episodes)
     """
-    if len(ep_rewards) == 0:
-        return 0.0
-    return np.max(ep_rewards)
+    def __init__(self, window: int = 100):
+        self.start_time: Optional[float] = None
+        self.episode_times: List[float] = []
+        self.window = window
+        self.current_ep_start: Optional[float] = None
 
-def run_episode(env, policy, render=False, max_steps=1000):
+    def start_training(self):
+        """Call at the start of training."""
+        self.start_time = time.time()
+
+    def start_episode(self):
+        """Call at the start of each episode."""
+        self.current_ep_start = time.time()
+
+    def end_episode(self):
+        """Call at the end of each episode."""
+        if self.current_ep_start is not None:
+            ep_time = time.time() - self.current_ep_start
+            self.episode_times.append(ep_time)
+            self.current_ep_start = None
+
+    def get_total_time(self) -> float:
+        """Returns total training time in seconds."""
+        if self.start_time is None:
+            return 0.0
+        return time.time() - self.start_time
+
+    def get_last_episode_time(self) -> float:
+        """Returns time taken for the last episode."""
+        if not self.episode_times:
+            return 0.0
+        return self.episode_times[-1]
+
+    def get_avg_episode_time(self) -> float:
+        """Returns average time per episode over the last `window` episodes."""
+        if not self.episode_times:
+            return 0.0
+        recent = self.episode_times[-self.window:] if len(self.episode_times) >= self.window else self.episode_times
+        return float(np.mean(recent))
+
+    def get_estimated_remaining_time(self, total_episodes: int, current_episode: int) -> float:
+        """Estimates remaining training time based on average episode time."""
+        if current_episode >= total_episodes:
+            return 0.0
+        avg_time = self.get_avg_episode_time()
+        remaining_eps = total_episodes - current_episode
+        return avg_time * remaining_eps
+
+
+class GradientStatsProfiler:
     """
-    Runs one full episode of Pacman using the current policy.
-
-    Args:
-        env: The Pacman game environment (must support reset() and step(action))
-        policy: Function or model that selects actions given a state
-        render (bool): Whether to show the game visually (slows down training)
-        max_steps (int): Safety cap for steps per episode
-
-    Returns:
-        float: Total reward collected during this episode
+    Tracks gradient statistics for neural networks:
+    - Gradient norms (L2 norm) for policy and value networks
+    - Average gradient norms over last N updates
     """
-    state = env.reset()         # Reset environment at start of episode
-    done = False
-    total_reward = 0.0
+    def __init__(self, window: int = 100):
+        self.policy_grad_norms: List[float] = []
+        self.value_grad_norms: List[float] = []
+        self.window = window
 
-    for step in range(max_steps):
-        if render:
-            env.render()        # Optional: display game window
-        
-        # Get action from policy
-        action = policy(state)
-        
-        # Step the environment
-        next_state, reward, done, info = env.step(action)
-        
-        total_reward += reward
-        state = next_state
+    def compute_grad_norm(self, model: nn.Module) -> float:
+        """Computes L2 norm of all gradients in the model."""
+        total_norm = 0.0
+        param_count = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                param_count += 1
+        if param_count == 0:
+            return 0.0
+        total_norm = total_norm ** (1. / 2)
+        return float(total_norm)
 
-        if done:
-            break
+    def update_policy_grad(self, policy: nn.Module):
+        """Call after policy backward pass to record gradient norm."""
+        grad_norm = self.compute_grad_norm(policy)
+        self.policy_grad_norms.append(grad_norm)
 
-    return total_reward
+    def update_value_grad(self, value: nn.Module):
+        """Call after value network backward pass to record gradient norm."""
+        grad_norm = self.compute_grad_norm(value)
+        self.value_grad_norms.append(grad_norm)
 
-ep_rewards = []  # stores total reward per ep
-env = ...      # your Pacman environment
-policy = ...   # your policy function or model
+    def get_last_policy_grad_norm(self) -> float:
+        """Returns the last recorded policy gradient norm."""
+        if not self.policy_grad_norms:
+            return 0.0
+        return self.policy_grad_norms[-1]
 
-# Example usage in training loop
-num_eps = 1000
-for ep in range(num_eps):
-    total_reward = run_episode(env, policy)  # your episode execution
-    ep_rewards.append(total_reward)
+    def get_last_value_grad_norm(self) -> float:
+        """Returns the last recorded value gradient norm."""
+        if not self.value_grad_norms:
+            return 0.0
+        return self.value_grad_norms[-1]
 
-    # Compute tracking metrics
-    var_return = return_var(ep_rewards, window_size=100)
-    best_reward =best_ep_reward(ep_rewards)
-    
-    print(f"Episode {ep+1} | Total Reward: {total_reward:.2f} | "
-          f"Return Variance (100ep): {var_return:.2f} | "
-          f"Best Reward: {best_reward:.2f}")
+    def get_avg_policy_grad_norm(self) -> float:
+        """Returns average policy gradient norm over last `window` updates."""
+        if not self.policy_grad_norms:
+            return 0.0
+        recent = self.policy_grad_norms[-self.window:] if len(self.policy_grad_norms) >= self.window else self.policy_grad_norms
+        return float(np.mean(recent))
+
+    def get_avg_value_grad_norm(self) -> float:
+        """Returns average value gradient norm over last `window` updates."""
+        if not self.value_grad_norms:
+            return 0.0
+        recent = self.value_grad_norms[-self.window:] if len(self.value_grad_norms) >= self.window else self.value_grad_norms
+        return float(np.mean(recent))
